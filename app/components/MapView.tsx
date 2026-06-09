@@ -1,15 +1,93 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
   MOCK_ORGANISATIONS,
+  ORG_TYPE_COLORS as MOCK_COLORS,
+  ORG_TYPE_LABELS as MOCK_LABELS,
+  Organisation as MockOrg,
+  OrgType as MockOrgType,
+} from '../data/mock-organisations';
+import {
   ORG_TYPE_COLORS,
   ORG_TYPE_LABELS,
-  Organisation,
   OrgType,
-} from '../data/mock-organisations';
+  OrganisationWithOrder,
+} from '../lib/types';
 
 import 'leaflet/dist/leaflet.css';
+
+// Unified org shape for rendering (works with both mock and real data)
+interface MapOrg {
+  id: string;
+  orgName: string;
+  orgType: OrgType;
+  address: string;
+  postcode: string;
+  lat: number;
+  lon: number;
+  deliveriesTotal: number;
+  contactPerson: string | null;
+  phone: string | null;
+  email: string | null;
+  activeOrder: {
+    id: string;
+    targetAmountPence: number;
+    pledgedAmountPence: number;
+    status: string;
+    appealTitle: string;
+  } | null;
+}
+
+function fromApi(org: OrganisationWithOrder): MapOrg {
+  return {
+    id: org.id,
+    orgName: org.org_name,
+    orgType: org.org_type,
+    address: org.address ?? '',
+    postcode: org.postcode ?? '',
+    lat: org.lat!,
+    lon: org.lon!,
+    deliveriesTotal: org.deliveries_total,
+    contactPerson: org.contact_person_1,
+    phone: org.phone,
+    email: org.email_1,
+    activeOrder: org.active_order
+      ? {
+          id: org.active_order.id,
+          targetAmountPence: org.active_order.target_amount_pence,
+          pledgedAmountPence: org.active_order.pledged_amount_pence,
+          status: org.active_order.status,
+          appealTitle: org.active_order.appeal_title,
+        }
+      : null,
+  };
+}
+
+function fromMock(org: MockOrg): MapOrg {
+  return {
+    id: org.id,
+    orgName: org.orgName,
+    orgType: org.orgType,
+    address: org.address,
+    postcode: org.postcode,
+    lat: org.lat,
+    lon: org.lon,
+    deliveriesTotal: org.deliveriesTotal,
+    contactPerson: org.contactPerson,
+    phone: org.phone,
+    email: org.email,
+    activeOrder: org.activeOrder
+      ? {
+          id: org.activeOrder.id,
+          targetAmountPence: org.activeOrder.targetAmountPence,
+          pledgedAmountPence: org.activeOrder.pledgedAmountPence,
+          status: org.activeOrder.status,
+          appealTitle: org.activeOrder.appealTitle,
+        }
+      : null,
+  };
+}
 
 function formatPence(pence: number): string {
   return `£${(pence / 100).toFixed(2)}`;
@@ -22,7 +100,7 @@ function statusBadge(status: string): string {
     case 'funded':
       return '<span style="background:#f59e0b;color:#fff;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600">FUNDED — AWAITING DELIVERY</span>';
     case 'delivered':
-      return '<span style="background:#16a34a;color:#fff;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600">DELIVERED ✓</span>';
+      return '<span style="background:#16a34a;color:#fff;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600">DELIVERED</span>';
     default:
       return '';
   }
@@ -44,9 +122,9 @@ function progressBar(pledged: number, target: number): string {
   `;
 }
 
-function buildPopup(org: Organisation): string {
-  const typeLabel = ORG_TYPE_LABELS[org.orgType];
-  const color = ORG_TYPE_COLORS[org.orgType];
+function buildPopup(org: MapOrg): string {
+  const typeLabel = ORG_TYPE_LABELS[org.orgType] ?? org.orgType;
+  const color = ORG_TYPE_COLORS[org.orgType] ?? '#6b7280';
 
   let html = `
     <div style="min-width:260px;max-width:320px;font-family:system-ui,sans-serif">
@@ -55,14 +133,13 @@ function buildPopup(org: Organisation): string {
         <span style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">${typeLabel}</span>
       </div>
       <h3 style="margin:0 0 4px;font-size:16px;font-weight:700;color:#1e293b">${org.orgName}</h3>
-      <p style="margin:0 0 8px;font-size:13px;color:#64748b">${org.address}, ${org.postcode}</p>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b">${org.address}${org.postcode ? `, ${org.postcode}` : ''}</p>
   `;
 
   html += `
     <div style="background:#f8fafc;border-radius:8px;padding:8px 10px;margin-bottom:8px">
       <div style="font-size:12px;color:#64748b;margin-bottom:2px">Delivery History</div>
       <div style="font-size:20px;font-weight:700;color:#1e293b">${org.deliveriesTotal} ${org.deliveriesTotal === 1 ? 'delivery' : 'deliveries'}</div>
-      <div style="font-size:11px;color:#94a3b8">${org.deliveryYears.join(', ')}</div>
     </div>
   `;
 
@@ -77,7 +154,7 @@ function buildPopup(org: Organisation): string {
         ${o.status !== 'delivered' ? progressBar(o.pledgedAmountPence, o.targetAmountPence) : ''}
         ${o.status === 'new' ? `
           <button
-            onclick="window.__tgpDonate && window.__tgpDonate('${org.id}')"
+            onclick="window.__tgpDonate && window.__tgpDonate('${org.id}', '${o.id}')"
             style="display:block;width:100%;padding:8px 0;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;margin-top:4px"
           >
             Donate Now
@@ -88,7 +165,7 @@ function buildPopup(org: Organisation): string {
   } else {
     html += `
       <div style="text-align:center;padding:6px;font-size:12px;color:#16a34a;font-weight:500">
-        All deliveries fulfilled ✓
+        All deliveries fulfilled
       </div>
     `;
   }
@@ -108,7 +185,7 @@ function buildPopup(org: Organisation): string {
 function createMarkerIcon(orgType: OrgType, hasActiveOrder: boolean): L.DivIcon | null {
   if (typeof window === 'undefined') return null;
   const L = require('leaflet');
-  const color = ORG_TYPE_COLORS[orgType];
+  const color = ORG_TYPE_COLORS[orgType] ?? '#6b7280';
   const pulse = hasActiveOrder
     ? `<span style="position:absolute;top:-3px;right:-3px;width:10px;height:10px;background:#ef4444;border-radius:50%;border:2px solid #fff;animation:pulse 2s infinite"></span>`
     : '';
@@ -132,10 +209,35 @@ function createMarkerIcon(orgType: OrgType, hasActiveOrder: boolean): L.DivIcon 
 
 export default function MapView() {
   const [map, setMap] = useState<L.Map | null>(null);
+  const [organisations, setOrganisations] = useState<MapOrg[]>([]);
   const [activeFilters, setActiveFilters] = useState<Set<OrgType>>(new Set());
   const [showNeedsFunding, setShowNeedsFunding] = useState(false);
-  const [donateModalOrg, setDonateModalOrg] = useState<Organisation | null>(null);
+  const [donateOrg, setDonateOrg] = useState<MapOrg | null>(null);
+  const [donateAmount, setDonateAmount] = useState<number | null>(null);
+  const [donateLoading, setDonateLoading] = useState(false);
+  const [dataSource, setDataSource] = useState<'loading' | 'api' | 'mock'>('loading');
 
+  // Load data — try API first, fall back to mock
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch('/api/organisations');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            setOrganisations(data.map(fromApi));
+            setDataSource('api');
+            return;
+          }
+        }
+      } catch {}
+      setOrganisations(MOCK_ORGANISATIONS.map(fromMock));
+      setDataSource('mock');
+    }
+    load();
+  }, []);
+
+  // Init map
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -168,20 +270,22 @@ export default function MapView() {
 
     setMap(m);
 
-    (window as any).__tgpDonate = (orgId: string) => {
-      const org = MOCK_ORGANISATIONS.find((o) => o.id === orgId);
-      if (org) {
-        setDonateModalOrg(org);
-      }
-    };
-
     return () => {
       m.remove();
-      delete (window as any).__tgpDonate;
       style.remove();
     };
   }, []);
 
+  // Donate handler
+  useEffect(() => {
+    (window as any).__tgpDonate = (orgId: string, orderId: string) => {
+      const org = organisations.find((o) => o.id === orgId);
+      if (org) setDonateOrg(org);
+    };
+    return () => { delete (window as any).__tgpDonate; };
+  }, [organisations]);
+
+  // Render markers
   useEffect(() => {
     if (!map) return;
     const L = require('leaflet');
@@ -190,7 +294,7 @@ export default function MapView() {
       if (layer instanceof L.Marker) map.removeLayer(layer);
     });
 
-    const filtered = MOCK_ORGANISATIONS.filter((org) => {
+    const filtered = organisations.filter((org) => {
       if (activeFilters.size > 0 && !activeFilters.has(org.orgType)) return false;
       if (showNeedsFunding && (!org.activeOrder || org.activeOrder.status !== 'new')) return false;
       return true;
@@ -202,7 +306,7 @@ export default function MapView() {
       const marker = L.marker([org.lat, org.lon], { icon }).addTo(map);
       marker.bindPopup(buildPopup(org), { maxWidth: 340 });
     });
-  }, [map, activeFilters, showNeedsFunding]);
+  }, [map, organisations, activeFilters, showNeedsFunding]);
 
   const toggleFilter = (type: OrgType) => {
     setActiveFilters((prev) => {
@@ -213,14 +317,36 @@ export default function MapView() {
     });
   };
 
+  async function handleDonate() {
+    if (!donateOrg?.activeOrder || !donateAmount) return;
+    setDonateLoading(true);
+    try {
+      const res = await fetch('/api/donate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          order_id: donateOrg.activeOrder.id,
+          amount_pence: donateAmount,
+          gift_aid: (document.getElementById('gift-aid') as HTMLInputElement)?.checked ?? false,
+        }),
+      });
+      const data = await res.json();
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        alert(data.error || 'Could not start payment. Stripe may not be configured yet.');
+      }
+    } catch {
+      alert('Payment service not available yet.');
+    } finally {
+      setDonateLoading(false);
+    }
+  }
+
   const stats = {
-    totalOrgs: MOCK_ORGANISATIONS.length,
-    totalDeliveries: MOCK_ORGANISATIONS.reduce((s, o) => s + o.deliveriesTotal, 0),
-    needsFunding: MOCK_ORGANISATIONS.filter((o) => o.activeOrder?.status === 'new').length,
-    totalRaised: MOCK_ORGANISATIONS.reduce(
-      (s, o) => s + (o.activeOrder ? o.activeOrder.pledgedAmountPence : 0),
-      0
-    ),
+    totalOrgs: organisations.length,
+    totalDeliveries: organisations.reduce((s, o) => s + o.deliveriesTotal, 0),
+    needsFunding: organisations.filter((o) => o.activeOrder?.status === 'new').length,
   };
 
   return (
@@ -253,7 +379,6 @@ export default function MapView() {
           </div>
         </div>
 
-        {/* Stats bar */}
         <div style={{ display: 'flex', gap: 24, fontSize: 13 }}>
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 20, fontWeight: 700 }}>{stats.totalOrgs}</div>
@@ -302,14 +427,7 @@ export default function MapView() {
                 cursor: 'pointer',
               }}
             >
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: ORG_TYPE_COLORS[type],
-                }}
-              />
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: ORG_TYPE_COLORS[type] }} />
               {ORG_TYPE_LABELS[type]}
             </button>
           );
@@ -332,6 +450,15 @@ export default function MapView() {
         >
           Needs Funding Only
         </button>
+
+        {dataSource === 'mock' && (
+          <>
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 11, color: '#f59e0b', fontWeight: 500 }}>
+              Demo data — connect Supabase to show real organisations
+            </span>
+          </>
+        )}
       </div>
 
       {/* Map */}
@@ -371,7 +498,7 @@ export default function MapView() {
       </div>
 
       {/* Donate Modal */}
-      {donateModalOrg && donateModalOrg.activeOrder && (
+      {donateOrg && donateOrg.activeOrder && (
         <div
           style={{
             position: 'fixed',
@@ -382,7 +509,7 @@ export default function MapView() {
             justifyContent: 'center',
             zIndex: 2000,
           }}
-          onClick={() => setDonateModalOrg(null)}
+          onClick={() => { setDonateOrg(null); setDonateAmount(null); }}
         >
           <div
             style={{
@@ -396,10 +523,10 @@ export default function MapView() {
             onClick={(e) => e.stopPropagation()}
           >
             <h2 style={{ margin: '0 0 4px', fontSize: 22, fontWeight: 700, color: '#1e293b' }}>
-              {donateModalOrg.activeOrder.appealTitle}
+              {donateOrg.activeOrder.appealTitle}
             </h2>
             <p style={{ margin: '0 0 16px', fontSize: 14, color: '#64748b' }}>
-              {donateModalOrg.orgName} — {donateModalOrg.postcode}
+              {donateOrg.orgName} — {donateOrg.postcode}
             </p>
 
             <div style={{
@@ -411,27 +538,25 @@ export default function MapView() {
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, marginBottom: 8 }}>
                 <span style={{ color: '#64748b' }}>Goal</span>
                 <span style={{ fontWeight: 700, color: '#1e293b' }}>
-                  {formatPence(donateModalOrg.activeOrder.targetAmountPence)}
+                  {formatPence(donateOrg.activeOrder.targetAmountPence)}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, marginBottom: 8 }}>
                 <span style={{ color: '#64748b' }}>Raised so far</span>
                 <span style={{ fontWeight: 700, color: '#16a34a' }}>
-                  {formatPence(donateModalOrg.activeOrder.pledgedAmountPence)}
+                  {formatPence(donateOrg.activeOrder.pledgedAmountPence)}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14 }}>
                 <span style={{ color: '#64748b' }}>Still needed</span>
                 <span style={{ fontWeight: 700, color: '#ef4444' }}>
                   {formatPence(
-                    donateModalOrg.activeOrder.targetAmountPence -
-                      donateModalOrg.activeOrder.pledgedAmountPence
+                    donateOrg.activeOrder.targetAmountPence - donateOrg.activeOrder.pledgedAmountPence
                   )}
                 </span>
               </div>
             </div>
 
-            {/* Amount buttons */}
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#475569', marginBottom: 8 }}>
                 Choose an amount
@@ -440,14 +565,15 @@ export default function MapView() {
                 {[500, 1000, 2500, 5000].map((amt) => (
                   <button
                     key={amt}
+                    onClick={() => setDonateAmount(amt)}
                     style={{
                       padding: '10px 0',
-                      border: '1.5px solid #e2e8f0',
+                      border: `1.5px solid ${donateAmount === amt ? '#2563eb' : '#e2e8f0'}`,
                       borderRadius: 8,
-                      background: '#fff',
+                      background: donateAmount === amt ? '#eff6ff' : '#fff',
                       fontSize: 14,
                       fontWeight: 600,
-                      color: '#1e293b',
+                      color: donateAmount === amt ? '#2563eb' : '#1e293b',
                       cursor: 'pointer',
                     }}
                   >
@@ -457,7 +583,6 @@ export default function MapView() {
               </div>
             </div>
 
-            {/* Gift Aid */}
             <div style={{
               background: '#eff6ff',
               borderRadius: 8,
@@ -475,30 +600,26 @@ export default function MapView() {
             </div>
 
             <button
-              onClick={() => {
-                alert(
-                  'This is a prototype — Stripe payment integration will be wired up in the real version.'
-                );
-                setDonateModalOrg(null);
-              }}
+              onClick={handleDonate}
+              disabled={!donateAmount || donateLoading}
               style={{
                 display: 'block',
                 width: '100%',
                 padding: '12px 0',
-                background: '#2563eb',
+                background: !donateAmount ? '#94a3b8' : '#2563eb',
                 color: '#fff',
                 border: 'none',
                 borderRadius: 8,
                 fontSize: 16,
                 fontWeight: 700,
-                cursor: 'pointer',
+                cursor: !donateAmount ? 'not-allowed' : 'pointer',
               }}
             >
-              Donate with Stripe
+              {donateLoading ? 'Redirecting to Stripe...' : donateAmount ? `Donate ${formatPence(donateAmount)}` : 'Select an amount'}
             </button>
 
             <button
-              onClick={() => setDonateModalOrg(null)}
+              onClick={() => { setDonateOrg(null); setDonateAmount(null); }}
               style={{
                 display: 'block',
                 width: '100%',
